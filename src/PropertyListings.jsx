@@ -1006,17 +1006,23 @@ export default function PropertyApp() {
 
   // Load from Supabase on mount
   useEffect(() => {
-    supabase.from('properties').select('*').order('created_at', { ascending: false }).then(({ data }) => {
-      if (data && data.length > 0) {
-        setProperties(data.filter(r => !r.archived).map(r => ({ id: r.id, ...r.data })));
-        setArchived(data.filter(r => r.archived).map(r => ({ id: r.id, ...r.data })));
-      } else {
-        // Seed sample properties on first run
-        const seeds = SAMPLE_PROPERTIES.map(({ id, ...data }) => ({ id, data, archived: false }));
-        supabase.from('properties').insert(seeds).then(() => setProperties(SAMPLE_PROPERTIES));
-      }
-      setLoading(false);
-    });
+    supabase.from('properties').select('*').order('created_at', { ascending: false })
+      .then(({ data, error }) => {
+        if (error) { console.error('Supabase load error:', error); setLoading(false); return; }
+        if (data && data.length > 0) {
+          setProperties(data.filter(r => !r.archived).map(r => ({ id: r.id, ...r.data })));
+          setArchived(data.filter(r => r.archived).map(r => ({ id: r.id, ...r.data })));
+          setLoading(false);
+        } else {
+          // Seed sample properties on first run
+          const seeds = SAMPLE_PROPERTIES.map(({ id, ...data }) => ({ id, data, archived: false }));
+          supabase.from('properties').insert(seeds).then(() => {
+            setProperties(SAMPLE_PROPERTIES);
+            setLoading(false);
+          });
+        }
+      })
+      .catch(err => { console.error('Supabase error:', err); setLoading(false); });
   }, []);
 
   const sorted = useMemo(() => {
