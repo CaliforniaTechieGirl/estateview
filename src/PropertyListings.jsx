@@ -888,11 +888,11 @@ Return this exact JSON (no markdown, no explanation, just JSON):
   "lng": 0
 }`;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 2000,
       messages: [{ role: "user", content: prompt }]
     })
@@ -912,11 +912,11 @@ Return this exact JSON (no markdown, no explanation, just JSON):
 };
 
 const suggestViaAI = async (topProperties) => {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 1500,
       messages: [{
         role: "user",
