@@ -447,6 +447,10 @@ const MapView = ({ properties, onSelectProperty }) => {
 const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes, onUpdateDetails, onArchive }) => {
   const [editingPhotos, setEditingPhotos] = useState(false);
   const [editingDetails, setEditingDetails] = useState(false);
+  const [showReExtract, setShowReExtract] = useState(false);
+  const [reExtractText, setReExtractText] = useState("");
+  const [reExtracting, setReExtracting] = useState(false);
+  const [reExtractError, setReExtractError] = useState("");
   const [draft, setDraft] = useState({});
   const [pendingFront, setPendingFront] = useState(null);
   const [pendingLiving, setPendingLiving] = useState(null);
@@ -499,6 +503,38 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
       features: draft.features ? draft.features.split(",").map(f => f.trim()).filter(Boolean) : [],
     });
     setEditingDetails(false);
+  };
+
+  const handleReExtract = async () => {
+    if (!reExtractText.trim()) return;
+    setReExtracting(true);
+    setReExtractError("");
+    try {
+      const data = await uploadViaAI(reExtractText, true);
+      onUpdateDetails(property.id, {
+        name: data.name || property.name,
+        location: data.location || property.location,
+        price: data.price || property.price,
+        status: data.status || property.status,
+        bedrooms: data.bedrooms || property.bedrooms,
+        bathrooms: data.bathrooms || property.bathrooms,
+        houseSqft: data.houseSqft || property.houseSqft,
+        propertySqft: data.propertySqft || property.propertySqft,
+        features: data.features?.length ? data.features : property.features,
+        nearestAirport: data.nearestAirport || property.nearestAirport,
+        driveToAirport: data.driveToAirport || property.driveToAirport,
+        farmersMarket: data.farmersMarket || property.farmersMarket,
+        touristAttraction: data.touristAttraction || property.touristAttraction,
+        agent: data.agent || property.agent,
+        lat: data.lat || property.lat,
+        lng: data.lng || property.lng,
+      });
+      setShowReExtract(false);
+      setReExtractText("");
+    } catch (e) {
+      setReExtractError("Extraction failed: " + (e.message || "Unknown error"));
+    }
+    setReExtracting(false);
   };
 
   const Field = ({ label, field, type = "text", options }) => (
@@ -648,7 +684,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
             }}
           >📷 Edit Photos</button>
           <button
-            onClick={() => editingDetails ? setEditingDetails(false) : openDetailsEditor()}
+            onClick={() => { setEditingDetails(d => !d); setShowReExtract(false); }}
             style={{
               position: "absolute", top: 10, right: 130,
               background: "rgba(255,255,255,0.92)", color: "#2a2420",
@@ -657,6 +693,17 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
               fontFamily: "'DM Sans', sans-serif", fontWeight: 500,
             }}
           >✏️ Edit Details</button>
+          <button
+            onClick={() => { setShowReExtract(r => !r); setEditingDetails(false); setEditingPhotos(false); setReExtractError(""); }}
+            style={{
+              position: "absolute", top: 10, right: 252,
+              background: showReExtract ? "rgba(42,36,32,0.85)" : "rgba(255,255,255,0.92)",
+              color: showReExtract ? "#fff" : "#2a2420",
+              border: "0.5px solid #e2ddd5", borderRadius: 20,
+              padding: "5px 12px", fontSize: 12, cursor: "pointer",
+              fontFamily: "'DM Sans', sans-serif", fontWeight: 500,
+            }}
+          >📋 Update from text</button>
         </div>
 
         {/* Photo editor panel */}
@@ -715,6 +762,40 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
             </div>
           </div>
         )}
+
+        {/* Re-extract from text panel */}
+        {showReExtract && (
+          <div style={{ background: "#f5f1eb", borderBottom: "0.5px solid #e2ddd5", padding: "20px 24px" }}>
+            <p style={{ fontSize: 13, color: "#8a7f74", margin: "0 0 12px", lineHeight: 1.6 }}>
+              Paste the full listing text below. Claude will extract the details and update this card — your photos, URL, notes, and rating are preserved.
+            </p>
+            <textarea
+              value={reExtractText}
+              onChange={e => setReExtractText(e.target.value)}
+              placeholder="Paste listing text here…"
+              rows={5}
+              style={{
+                width: "100%", border: "0.5px solid #e2ddd5", borderRadius: 10,
+                padding: "10px 12px", fontSize: 13, fontFamily: "'DM Sans', sans-serif",
+                color: "#2a2420", background: "#fff", resize: "vertical",
+                outline: "none", boxSizing: "border-box", lineHeight: 1.6,
+              }}
+            />
+            {reExtractError && <p style={{ fontSize: 12, color: "#b71c1c", margin: "8px 0 0" }}>{reExtractError}</p>}
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button
+                onClick={handleReExtract}
+                disabled={reExtracting || !reExtractText.trim()}
+                style={{ background: "#2a2420", color: "#fff", border: "none", borderRadius: 8, padding: "8px 20px", fontSize: 13, cursor: reExtracting ? "wait" : "pointer", fontFamily: "'DM Sans', sans-serif", fontWeight: 500 }}
+              >{reExtracting ? "Extracting…" : "Extract & Update"}</button>
+              <button
+                onClick={() => { setShowReExtract(false); setReExtractText(""); setReExtractError(""); }}
+                style={{ background: "#fff", color: "#2a2420", border: "0.5px solid #e2ddd5", borderRadius: 8, padding: "8px 14px", fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+              >Cancel</button>
+            </div>
+          </div>
+        )}
+
         <div style={{ padding: "24px 28px 28px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
             <div>
