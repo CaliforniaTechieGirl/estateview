@@ -311,7 +311,7 @@ const GMAPS_API_KEY_STORAGE = "estateview_gmaps_key";
 
 const MapView = ({ properties, onSelectProperty }) => {
   const [apiKey, setApiKey] = useState(() => {
-    try { return localStorage.getItem(GMAPS_API_KEY_STORAGE) || ""; } catch { return ""; }
+    try { return localStorage.getItem(GMAPS_API_KEY_STORAGE) || import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ""; } catch { return import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ""; }
   });
   const [keyInput, setKeyInput] = useState("");
   const [selectedProperty, setSelectedProperty] = useState(null);
