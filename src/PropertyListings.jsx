@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from "react";
+import { supabase } from './supabase';
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500&display=swap');`;
 
@@ -534,9 +535,24 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
     input.click();
   };
 
-  const savePhotos = () => {
-    const newFront = frontPasteUrl.trim() || pendingFront?.url || property.frontImage;
-    const newLiving = livingPasteUrl.trim() || pendingLiving?.url || property.livingRoomImage;
+  const savePhotos = async () => {
+    let newFront = frontPasteUrl.trim() || property.frontImage;
+    let newLiving = livingPasteUrl.trim() || property.livingRoomImage;
+
+    if (pendingFront?.url?.startsWith('data:')) {
+      const url = await uploadPhoto(property.id, 'front', pendingFront.url);
+      if (url) newFront = url;
+    } else if (pendingFront?.url) {
+      newFront = pendingFront.url;
+    }
+
+    if (pendingLiving?.url?.startsWith('data:')) {
+      const url = await uploadPhoto(property.id, 'living', pendingLiving.url);
+      if (url) newLiving = url;
+    } else if (pendingLiving?.url) {
+      newLiving = pendingLiving.url;
+    }
+
     onUpdatePhotos(property.id, newFront, newLiving);
     setEditingPhotos(false);
     if (modalRef.current) modalRef.current.scrollTop = 0;
@@ -936,42 +952,40 @@ Return only valid JSON array, no markdown.`
   return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
 };
 
-// ── Storage helpers ──────────────────────────────────────────────
-const STORAGE_KEYS = {
-  properties: "estateview_properties",
-  archived: "estateview_archived",
+// ── Supabase helpers ─────────────────────────────────────────────
+const upsertProperty = async (property, archived = false) => {
+  const { id, ...data } = property;
+  await supabase.from('properties').upsert({ id, data, archived });
 };
 
-const loadFromStorage = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch { return fallback; }
+const deletePropertyFromDB = async (id) => {
+  await supabase.from('properties').delete().eq('id', id);
 };
 
-const saveToStorage = (key, value) => {
-  try {
-    // Base64 images can be huge — store without them to stay under quota,
-    // but keep URLs (http/https) intact.
-    const stripped = JSON.stringify(value, (k, v) => {
-      if (typeof v === "string" && v.startsWith("data:image")) return "__local_image__";
-      return v;
-    });
-    localStorage.setItem(key, stripped);
-  } catch (e) {
-    console.warn("localStorage save failed:", e);
-  }
+const dataURLtoBlob = (dataUrl) => {
+  const [header, base64] = dataUrl.split(',');
+  const mime = header.match(/:(.*?);/)[1];
+  const bytes = atob(base64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+};
+
+const uploadPhoto = async (propertyId, slot, dataUrl) => {
+  const ext = dataUrl.split(';')[0].split('/')[1] || 'jpg';
+  const path = `${propertyId}/${slot}-${Date.now()}.${ext}`;
+  const blob = dataURLtoBlob(dataUrl);
+  const { error } = await supabase.storage.from('property-photos').upload(path, blob, { upsert: true });
+  if (error) return null;
+  const { data } = supabase.storage.from('property-photos').getPublicUrl(path);
+  return data.publicUrl;
 };
 // ─────────────────────────────────────────────────────────────────
 
 export default function PropertyApp() {
-  const [properties, setProperties] = useState(() =>
-    loadFromStorage(STORAGE_KEYS.properties, SAMPLE_PROPERTIES)
-  );
-  const [archived, setArchived] = useState(() =>
-    loadFromStorage(STORAGE_KEYS.archived, [])
-  );
+  const [properties, setProperties] = useState([]);
+  const [archived, setArchived] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [view, setView] = useState("cards");
   const [sort, setSort] = useState("recent_desc");
   const [selectedColumns, setSelectedColumns] = useState(["Price", "Location", "Agent", "Beds", "Baths", "Status", "Rating"]);
@@ -990,9 +1004,20 @@ export default function PropertyApp() {
   const [showAddField, setShowAddField] = useState(false);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
 
-  // Persist whenever properties or archived changes
-  useEffect(() => { saveToStorage(STORAGE_KEYS.properties, properties); }, [properties]);
-  useEffect(() => { saveToStorage(STORAGE_KEYS.archived, archived); }, [archived]);
+  // Load from Supabase on mount
+  useEffect(() => {
+    supabase.from('properties').select('*').order('created_at', { ascending: false }).then(({ data }) => {
+      if (data && data.length > 0) {
+        setProperties(data.filter(r => !r.archived).map(r => ({ id: r.id, ...r.data })));
+        setArchived(data.filter(r => r.archived).map(r => ({ id: r.id, ...r.data })));
+      } else {
+        // Seed sample properties on first run
+        const seeds = SAMPLE_PROPERTIES.map(({ id, ...data }) => ({ id, data, archived: false }));
+        supabase.from('properties').insert(seeds).then(() => setProperties(SAMPLE_PROPERTIES));
+      }
+      setLoading(false);
+    });
+  }, []);
 
   const sorted = useMemo(() => {
     let list = [...properties];
@@ -1012,17 +1037,32 @@ export default function PropertyApp() {
   }, [properties, sort, filterStatus]);
 
   const handleRate = (id, rating) => {
-    setProperties(prev => prev.map(p => p.id === id ? { ...p, rating } : p));
+    setProperties(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, rating } : p);
+      const prop = updated.find(p => p.id === id);
+      if (prop) upsertProperty(prop);
+      return updated;
+    });
     if (detailProperty?.id === id) setDetailProperty(prev => ({ ...prev, rating }));
   };
 
   const handleUpdateNotes = (id, notes) => {
-    setProperties(prev => prev.map(p => p.id === id ? { ...p, notes } : p));
+    setProperties(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, notes } : p);
+      const prop = updated.find(p => p.id === id);
+      if (prop) upsertProperty(prop);
+      return updated;
+    });
     if (detailProperty?.id === id) setDetailProperty(prev => ({ ...prev, notes }));
   };
 
   const handleUpdateDetails = (id, updates) => {
-    setProperties(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+    setProperties(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, ...updates } : p);
+      const prop = updated.find(p => p.id === id);
+      if (prop) upsertProperty(prop);
+      return updated;
+    });
     setDetailProperty(prev => prev ? { ...prev, ...updates } : prev);
   };
 
@@ -1032,6 +1072,7 @@ export default function PropertyApp() {
     setArchived(prev => [prop, ...prev]);
     setProperties(prev => prev.filter(p => p.id !== id));
     setDetailProperty(null);
+    upsertProperty(prop, true);
   };
 
   const handleRestore = (id) => {
@@ -1039,14 +1080,21 @@ export default function PropertyApp() {
     if (!prop) return;
     setProperties(prev => [prop, ...prev]);
     setArchived(prev => prev.filter(p => p.id !== id));
+    upsertProperty(prop, false);
   };
 
   const handleDeletePermanent = (id) => {
     setArchived(prev => prev.filter(p => p.id !== id));
+    deletePropertyFromDB(id);
   };
 
   const handleUpdatePhotos = (id, frontImage, livingRoomImage) => {
-    setProperties(prev => prev.map(p => p.id === id ? { ...p, frontImage, livingRoomImage } : p));
+    setProperties(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, frontImage, livingRoomImage } : p);
+      const prop = updated.find(p => p.id === id);
+      if (prop) upsertProperty(prop);
+      return updated;
+    });
     setDetailProperty(prev => prev ? { ...prev, frontImage, livingRoomImage } : prev);
   };
 
@@ -1081,6 +1129,7 @@ export default function PropertyApp() {
         customFields: {},
       };
       setProperties(prev => [newProp, ...prev]);
+      upsertProperty(newProp);
       setUploadUrl("");
       setPasteText("");
       setShowPasteModal(false);
@@ -1143,6 +1192,12 @@ export default function PropertyApp() {
       default: return p.customFields?.[col] || "—";
     }
   };
+
+  if (loading) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#f7f3ef", fontFamily: "'DM Sans', sans-serif", color: "#8a7f74", fontSize: 14 }}>
+      Loading properties…
+    </div>
+  );
 
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif", background: "#f7f3ef", minHeight: "100vh" }}>
