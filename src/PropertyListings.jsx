@@ -854,16 +854,20 @@ const uploadViaAI = async (input, isText = false) => {
   const prompt = isText
     ? `You are a real estate data extraction specialist. Extract data from the listing text below and return ONLY a valid JSON object.
 
-EXTRACTION RULES — only extract what is explicitly stated. If a value is not clearly present, return 0 or "":
-- price: Extract the exact numeric price as stated. Strip spaces/dots/commas used as thousands separators. If in euros (€), multiply by 1.08 to convert to USD. If in GBP (£), multiply by 1.27. If price is not clearly stated as a number, return 0.
-- houseSqft: Interior living area only. If in m², multiply by 10.764. If in sq meters, multiply by 10.764. Return 0 if not explicitly stated.
-- propertySqft: Land/plot/terrain area only (not the house). If in m², multiply by 10.764. If in hectares, multiply by 107,639. If in acres, multiply by 43,560. Return 0 if not explicitly stated.
-- bedrooms: Return 0 if not stated.
-- bathrooms: Count salle de bain, salle d'eau, bathroom, shower room. Return 0 if not stated.
+RULES FOR FACTUAL FIELDS — extract only what is explicitly stated in the text, return 0 if not clearly present:
+- price: Extract the exact numeric price. Strip spaces/dots/commas used as thousands separators. Convert currencies: euros (€) × 1.08, GBP (£) × 1.27. Return 0 if price is not clearly stated as a number.
+- houseSqft: Interior living area only. Convert: m² × 10.764. Return 0 if not explicitly stated.
+- propertySqft: Land/plot/terrain area only (not the house). Convert: m² × 10.764, hectares × 107639, acres × 43560. Return 0 if not explicitly stated.
+- bedrooms, bathrooms: Return 0 if not stated. For bathrooms count salle de bain, salle d'eau, shower room.
 - features: Only include features explicitly mentioned — pool/piscine, jacuzzi/spa, tennis, pond/étang, barn/grange, chapel, tower, guest house, etc.
 - status: "available", "pending", or "sold". Default to "available".
-- nearestAirport, farmersMarket, touristAttraction: Only include if you are confident. Return "" if unsure.
-- lat/lng: Only include if you can determine the precise location. Return 0 if unsure.
+
+RULES FOR ENRICHMENT FIELDS — use your knowledge of the location to fill these in:
+- nearestAirport: The nearest airport with IATA code and full name.
+- driveToAirport: Estimated drive time.
+- farmersMarket: The nearest notable farmers market.
+- touristAttraction: The most notable nearby tourist attraction.
+- lat/lng: Coordinates for the property location.
 
 Listing text:
 ${input}
@@ -879,21 +883,25 @@ Return this exact JSON (no markdown, no explanation, just JSON):
   "houseSqft": 0,
   "propertySqft": 0,
   "features": [],
-  "nearestAirport": "",
-  "driveToAirport": "",
-  "farmersMarket": "",
-  "touristAttraction": "",
+  "nearestAirport": "Airport code and full name",
+  "driveToAirport": "XX min",
+  "farmersMarket": "Name of nearest farmers market",
+  "touristAttraction": "Nearest notable attraction",
   "agent": "",
   "website": "",
   "lat": 0,
   "lng": 0
 }`
-    : `You are a real estate data extraction specialist. Extract what you can from the listing URL below. Only include values you are confident about — return 0 or "" for anything uncertain.
+    : `You are a real estate data extraction specialist. Extract what you can from this listing URL.
 
-- Extract location from the URL path if clearly present
-- Do not guess prices — return 0 if the price is not in the URL
-- status should be "available" unless URL suggests otherwise
-- Only fill nearestAirport, farmersMarket, touristAttraction if you are highly confident
+FACTUAL FIELDS — only from the URL itself, return 0 if not present:
+- price: Return 0 (prices are not in URLs)
+- houseSqft, propertySqft, bedrooms, bathrooms: Return 0 unless clearly in the URL slug
+- features: Return [] unless mentioned in the URL
+
+ENRICHMENT FIELDS — use your knowledge of the location extracted from the URL:
+- location: Extract from the URL path (e.g. "angers", "dordogne", "carmel-by-the-sea")
+- nearestAirport, driveToAirport, farmersMarket, touristAttraction, lat, lng: Fill using your knowledge of that location
 
 URL: ${input}
 
@@ -908,10 +916,10 @@ Return this exact JSON (no markdown, no explanation, just JSON):
   "houseSqft": 0,
   "propertySqft": 0,
   "features": [],
-  "nearestAirport": "",
-  "driveToAirport": "",
-  "farmersMarket": "",
-  "touristAttraction": "",
+  "nearestAirport": "Nearest airport code and name",
+  "driveToAirport": "Estimated drive time",
+  "farmersMarket": "Nearest farmers market",
+  "touristAttraction": "Most notable nearby attraction",
   "agent": "",
   "website": "${input}",
   "lat": 0,
