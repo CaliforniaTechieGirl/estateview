@@ -955,7 +955,9 @@ Return only valid JSON array, no markdown.`
 // ── Supabase helpers ─────────────────────────────────────────────
 const upsertProperty = async (property, archived = false) => {
   const { id, ...data } = property;
-  await supabase.from('properties').upsert({ id, data, archived });
+  const { error } = await supabase.from('properties').upsert({ id, data, archived });
+  if (error) console.error('upsert error:', JSON.stringify(error));
+  else console.log('saved property', id);
 };
 
 const deletePropertyFromDB = async (id) => {
