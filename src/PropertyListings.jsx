@@ -114,6 +114,11 @@ const SAMPLE_PROPERTIES = [
 
 const fmtPrice = (p) => `$${(p / 1000000).toFixed(2)}M`;
 const fmtSqft = (s) => s?.toLocaleString() + " sqft";
+const fmtAcres = (sqft) => {
+  if (!sqft) return "—";
+  const acres = sqft / 43560;
+  return acres < 1 ? acres.toFixed(2) + " ac" : acres.toFixed(1) + " ac";
+};
 
 const StarRating = ({ rating, onRate, size = 18 }) => (
   <div style={{ display: "flex", gap: 2 }}>
@@ -469,7 +474,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
       bedrooms: property.bedrooms,
       bathrooms: property.bathrooms,
       houseSqft: property.houseSqft,
-      propertySqft: property.propertySqft,
+      propertySqft: property.propertySqft ? (property.propertySqft / 43560).toFixed(2) : 0,
       agent: property.agent,
       nearestAirport: property.nearestAirport,
       driveToAirport: property.driveToAirport,
@@ -490,7 +495,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
       bedrooms: parseFloat(draft.bedrooms) || 0,
       bathrooms: parseFloat(draft.bathrooms) || 0,
       houseSqft: parseFloat(String(draft.houseSqft).replace(/[^0-9.]/g, "")) || 0,
-      propertySqft: parseFloat(String(draft.propertySqft).replace(/[^0-9.]/g, "")) || 0,
+      propertySqft: (parseFloat(String(draft.propertySqft).replace(/[^0-9.]/g, "")) || 0) * 43560,
       features: draft.features ? draft.features.split(",").map(f => f.trim()).filter(Boolean) : [],
     });
     setEditingDetails(false);
@@ -693,7 +698,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
               <Field label="BEDROOMS" field="bedrooms" type="number" />
               <Field label="BATHROOMS" field="bathrooms" type="number" />
               <Field label="HOUSE SIZE (sqft)" field="houseSqft" type="number" />
-              <Field label="PROPERTY SIZE (sqft)" field="propertySqft" type="number" />
+              <Field label="PROPERTY SIZE (acres)" field="propertySqft" type="number" />
               <Field label="AGENT" field="agent" />
               <Field label="WEBSITE URL" field="website" />
               <Field label="NEAREST AIRPORT" field="nearestAirport" />
@@ -727,7 +732,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
               { label: "Bedrooms", val: property.bedrooms },
               { label: "Bathrooms", val: property.bathrooms },
               { label: "House", val: fmtSqft(property.houseSqft) },
-              { label: "Property", val: fmtSqft(property.propertySqft) },
+              { label: "Property", val: fmtAcres(property.propertySqft) },
               { label: "Agent", val: property.agent },
             ].map(({ label, val }) => (
               <div key={label} style={{ background: "#faf8f5", borderRadius: 10, padding: "10px 8px", textAlign: "center", border: "0.5px solid #ede8e0" }}>
@@ -843,19 +848,22 @@ const SORT_OPTIONS = [
   { value: "name_asc", label: "Name A–Z" },
 ];
 
-const ALL_COLUMNS = ["Price", "Location", "Agent", "Beds", "Baths", "House sqft", "Property sqft", "Status", "Rating", "Airport", "Market"];
+const ALL_COLUMNS = ["Price", "Location", "Agent", "Beds", "Baths", "House sqft", "Property acres", "Status", "Rating", "Airport", "Market"];
 
 const uploadViaAI = async (input, isText = false) => {
   const prompt = isText
     ? `You are a real estate data extraction specialist. Extract data from the listing text below and return ONLY a valid JSON object.
 
-CRITICAL EXTRACTION RULES:
-- price: Extract the numeric price (integer, no currency symbols). European listings often show prices like "1 250 000 €" or "1.250.000 €" — strip spaces/dots/commas and convert to integer. If price is in euros, convert to USD at 1.08 rate. Never return 0 if a price is visible.
-- houseSqft: Look for living area / surface habitable / Wohnfläche / superficie. If in sq meters, multiply by 10.764. Never return 0 if a size is mentioned.
-- propertySqft: Look for land/plot/terrain/garden area. If in sq meters or hectares (1 hectare = 107,639 sqft), convert. Never return 0 if mentioned.
-- bathrooms: Look for "salle de bain", "salle d'eau", "WC", "bathroom", "shower room" — count all wet rooms. Return at least 1 if it's a habitable property.
-- features: Look for pool/piscine, jacuzzi/spa/hot tub, tennis, pond/étang, barn/grange, chapel/chapelle, tower/tour, guest house — include anything distinctive.
+EXTRACTION RULES — only extract what is explicitly stated. If a value is not clearly present, return 0 or "":
+- price: Extract the exact numeric price as stated. Strip spaces/dots/commas used as thousands separators. If in euros (€), multiply by 1.08 to convert to USD. If in GBP (£), multiply by 1.27. If price is not clearly stated as a number, return 0.
+- houseSqft: Interior living area only. If in m², multiply by 10.764. If in sq meters, multiply by 10.764. Return 0 if not explicitly stated.
+- propertySqft: Land/plot/terrain area only (not the house). If in m², multiply by 10.764. If in hectares, multiply by 107,639. If in acres, multiply by 43,560. Return 0 if not explicitly stated.
+- bedrooms: Return 0 if not stated.
+- bathrooms: Count salle de bain, salle d'eau, bathroom, shower room. Return 0 if not stated.
+- features: Only include features explicitly mentioned — pool/piscine, jacuzzi/spa, tennis, pond/étang, barn/grange, chapel, tower, guest house, etc.
 - status: "available", "pending", or "sold". Default to "available".
+- nearestAirport, farmersMarket, touristAttraction: Only include if you are confident. Return "" if unsure.
+- lat/lng: Only include if you can determine the precise location. Return 0 if unsure.
 
 Listing text:
 ${input}
@@ -864,31 +872,28 @@ Return this exact JSON (no markdown, no explanation, just JSON):
 {
   "name": "property name or address",
   "location": "closest town, country",
-  "price": 1234567,
+  "price": 0,
   "status": "available",
-  "bedrooms": 4,
-  "bathrooms": 3.5,
-  "houseSqft": 3200,
-  "propertySqft": 43560,
-  "features": ["Pool","Jacuzzi","Tennis Court","Pond"],
-  "nearestAirport": "Airport code and full name",
-  "driveToAirport": "XX min",
-  "farmersMarket": "Name of nearest year-round farmers market",
-  "touristAttraction": "Nearest notable tourist attraction",
-  "agent": "Agent name if mentioned, else Unknown",
+  "bedrooms": 0,
+  "bathrooms": 0,
+  "houseSqft": 0,
+  "propertySqft": 0,
+  "features": [],
+  "nearestAirport": "",
+  "driveToAirport": "",
+  "farmersMarket": "",
+  "touristAttraction": "",
+  "agent": "",
   "website": "",
-  "lat": 48.8566,
-  "lng": 2.3522
+  "lat": 0,
+  "lng": 0
 }`
-    : `You are a real estate data extraction specialist. From the listing URL below, infer as much as you can from the URL slug, domain, and your knowledge of the region.
+    : `You are a real estate data extraction specialist. Extract what you can from the listing URL below. Only include values you are confident about — return 0 or "" for anything uncertain.
 
-CRITICAL RULES:
-- Extract location from the URL path (e.g. "angers", "sarlat-la-caneda", "dordogne" etc.)
-- Use your knowledge of French/European property markets for price ranges for the property type
-- For European properties convert sq meters to sqft (1 sqm = 10.764 sqft)
-- Use your knowledge of the region for nearest airport, farmers market, tourist attraction
-- Never return 0 for price if you can infer a reasonable range from property type and location
+- Extract location from the URL path if clearly present
+- Do not guess prices — return 0 if the price is not in the URL
 - status should be "available" unless URL suggests otherwise
+- Only fill nearestAirport, farmersMarket, touristAttraction if you are highly confident
 
 URL: ${input}
 
@@ -903,11 +908,11 @@ Return this exact JSON (no markdown, no explanation, just JSON):
   "houseSqft": 0,
   "propertySqft": 0,
   "features": [],
-  "nearestAirport": "Nearest airport code and name",
-  "driveToAirport": "Estimated drive time",
-  "farmersMarket": "Nearest town with a year-round farmers market",
-  "touristAttraction": "Most notable nearby attraction",
-  "agent": "Unknown",
+  "nearestAirport": "",
+  "driveToAirport": "",
+  "farmersMarket": "",
+  "touristAttraction": "",
+  "agent": "",
   "website": "${input}",
   "lat": 0,
   "lng": 0
@@ -1199,7 +1204,7 @@ export default function PropertyApp() {
       case "Beds": return p.bedrooms;
       case "Baths": return p.bathrooms;
       case "House sqft": return p.houseSqft?.toLocaleString();
-      case "Property sqft": return p.propertySqft?.toLocaleString();
+      case "Property acres": return fmtAcres(p.propertySqft);
       case "Status": return <StatusBadge status={p.status} />;
       case "Rating": return <StarRating rating={p.rating} onRate={v => handleRate(p.id, v)} size={13} />;
       case "Airport": return p.nearestAirport;
