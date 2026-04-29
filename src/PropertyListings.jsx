@@ -613,15 +613,24 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
       >
         {/* Photos */}
         <div style={{ position: "relative" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-            <div style={{ position: "relative" }}>
-              <img src={property.frontImage} alt="Exterior" style={{ width: "100%", height: 240, objectFit: "cover", borderRadius: "20px 0 0 0", display: "block" }} />
-              <div style={{ position: "absolute", bottom: 8, left: 8, fontSize: 11, background: "rgba(0,0,0,0.5)", color: "#fff", padding: "2px 8px", borderRadius: 20 }}>Exterior</div>
-            </div>
-            <div style={{ position: "relative" }}>
-              <img src={property.livingRoomImage} alt="Interior" style={{ width: "100%", height: 240, objectFit: "cover", borderRadius: "0 20px 0 0", display: "block" }} />
-              <div style={{ position: "absolute", bottom: 8, left: 8, fontSize: 11, background: "rgba(0,0,0,0.5)", color: "#fff", padding: "2px 8px", borderRadius: 20 }}>Interior</div>
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: (property.frontImage && property.livingRoomImage) ? "1fr 1fr" : "1fr" }}>
+            {property.frontImage ? (
+              <div style={{ position: "relative" }}>
+                <img src={property.frontImage} alt="Exterior" style={{ width: "100%", height: 240, objectFit: "cover", borderRadius: property.livingRoomImage ? "20px 0 0 0" : "20px 20px 0 0", display: "block" }} />
+                <div style={{ position: "absolute", bottom: 8, left: 8, fontSize: 11, background: "rgba(0,0,0,0.5)", color: "#fff", padding: "2px 8px", borderRadius: 20 }}>Exterior</div>
+              </div>
+            ) : null}
+            {property.livingRoomImage ? (
+              <div style={{ position: "relative" }}>
+                <img src={property.livingRoomImage} alt="Interior" style={{ width: "100%", height: 240, objectFit: "cover", borderRadius: property.frontImage ? "0 20px 0 0" : "20px 20px 0 0", display: "block" }} />
+                <div style={{ position: "absolute", bottom: 8, left: 8, fontSize: 11, background: "rgba(0,0,0,0.5)", color: "#fff", padding: "2px 8px", borderRadius: 20 }}>Interior</div>
+              </div>
+            ) : null}
+            {!property.frontImage && !property.livingRoomImage ? (
+              <div style={{ height: 120, background: "#f5f1eb", borderRadius: "20px 20px 0 0", display: "flex", alignItems: "center", justifyContent: "center", color: "#b0a48e", fontSize: 13 }}>
+                No photos yet — click Edit Photos to add some
+              </div>
+            ) : null}
           </div>
           <button
             onClick={() => editingPhotos ? setEditingPhotos(false) : openEditor()}
