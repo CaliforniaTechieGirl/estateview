@@ -7,6 +7,7 @@ const STATUS_COLORS = {
   available: { bg: "#e6f7ee", text: "#1a7a45", border: "#a3d9b8" },
   pending: { bg: "#fff3e0", text: "#c47f00", border: "#ffd08a" },
   sold: { bg: "#fdecea", text: "#b71c1c", border: "#f5a7a4" },
+  inactive: { bg: "#f0f0f0", text: "#757575", border: "#c4c4c4" },
 };
 
 const SAMPLE_PROPERTIES = [
@@ -315,15 +316,66 @@ const PropertyCard = ({ property, onRate, onOpen }) => {
 
 const GMAPS_API_KEY_STORAGE = "estateview_gmaps_key";
 
+// Group geocoded properties that share the same location (within ~33m)
+const groupByLocation = (props) => {
+  const THRESH = 0.0003;
+  const groups = [];
+  const assigned = new Set();
+  props.forEach((p, i) => {
+    if (assigned.has(i)) return;
+    if (!p._lat) {
+      groups.push({ key: `nc_${p.id}`, props: [p], lat: null, lng: null });
+      assigned.add(i);
+      return;
+    }
+    const cluster = [p];
+    assigned.add(i);
+    props.forEach((q, j) => {
+      if (assigned.has(j) || !q._lat) return;
+      if (Math.abs(p._lat - q._lat) < THRESH && Math.abs(p._lng - q._lng) < THRESH) {
+        cluster.push(q); assigned.add(j);
+      }
+    });
+    groups.push({ key: `${p._lat.toFixed(4)}_${p._lng.toFixed(4)}`, props: cluster, lat: p._lat, lng: p._lng });
+  });
+  return groups;
+};
+
+const getGroupColor = (group) => {
+  if (group.props.length > 1) return "#5a4a3a";
+  const s = group.props[0].status;
+  return s === "available" ? "#1a7a45" : s === "pending" ? "#c47f00" : "#b71c1c";
+};
+
+const makeMapIcon = (color, google) => ({
+  path: "M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z",
+  fillColor: color,
+  fillOpacity: 1,
+  strokeColor: "#fff",
+  strokeWeight: 2,
+  scale: 1.8,
+  anchor: new google.maps.Point(12, 22),
+  labelOrigin: new google.maps.Point(12, 9),
+});
+
 const MapView = ({ properties, onSelectProperty }) => {
   const [apiKey, setApiKey] = useState(() => {
     try { return localStorage.getItem(GMAPS_API_KEY_STORAGE) || import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ""; } catch { return import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ""; }
   });
   const [keyInput, setKeyInput] = useState("");
-  const [selectedProperty, setSelectedProperty] = useState(null);
+  const [geocodedProps, setGeocodedProps] = useState(null);
+  const [geocoding, setGeocoding] = useState(false);
+  const [mapError, setMapError] = useState(null);
+  const [mapReady, setMapReady] = useState(() => !!(window.google?.maps));
+  const [hoveredGroupKey, setHoveredGroupKey] = useState(null); // pin mouseover → highlight sidebar
+  const [sidebarHoverId, setSidebarHoverId] = useState(null);   // sidebar hover → pin turns red
+  const [selectedPropId, setSelectedPropId] = useState(null);   // sidebar click → pin stays red
+  const mapContainerRef = useRef(null);
+  const markersRef = useRef([]);
+  const groupsRef = useRef([]);
 
-  const propertiesWithCoords = properties.filter(p => p.lat && p.lng);
-  const activeProperty = selectedProperty || propertiesWithCoords[0] || null;
+  const visibleProps = properties.filter(p => !p.archived);
+  const propKey = visibleProps.map(p => `${p.id}:${p.status}`).join(",");
 
   const saveKey = () => {
     const k = keyInput.trim();
@@ -332,17 +384,137 @@ const MapView = ({ properties, onSelectProperty }) => {
     setApiKey(k);
   };
 
-  const getEmbedUrl = (p) => {
-    if (!p || !apiKey) return "";
-    return `https://www.google.com/maps/embed/v1/place?key=${apiKey}&q=${p.lat},${p.lng}&zoom=13&maptype=roadmap`;
-  };
+  // Load Google Maps JS API script
+  useEffect(() => {
+    if (!apiKey) return;
+    if (window.google?.maps) { setMapReady(true); return; }
+    const prev = document.querySelector("[data-gmaps-js]");
+    if (prev) { prev.addEventListener("load", () => setMapReady(true), { once: true }); return; }
+    const script = document.createElement("script");
+    script.setAttribute("data-gmaps-js", "");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
+    script.async = true;
+    script.onload = () => setMapReady(true);
+    script.onerror = () => setMapError("Failed to load Google Maps. Check your API key and make sure Maps JavaScript API and Geocoding API are enabled in Google Cloud Console.");
+    document.head.appendChild(script);
+  }, [apiKey]);
+
+  // Update marker colors when sidebar hover/selection changes
+  useEffect(() => {
+    if (!window.google?.maps) return;
+    groupsRef.current.forEach(group => {
+      if (!group.marker) return;
+      const isActive = group.props.some(p => p.id === selectedPropId || p.id === sidebarHoverId);
+      group.marker.setIcon(makeMapIcon(isActive ? "#e53935" : getGroupColor(group), window.google));
+    });
+  }, [sidebarHoverId, selectedPropId]);
+
+  // Initialize map and geocode all visible properties
+  useEffect(() => {
+    if (!mapReady || !mapContainerRef.current) return;
+
+    const map = new window.google.maps.Map(mapContainerRef.current, {
+      zoom: 3,
+      center: { lat: 30, lng: 0 },
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: true,
+    });
+
+    if (visibleProps.length === 0) return;
+
+    setGeocoding(true);
+    const geocoder = new window.google.maps.Geocoder();
+
+    let cancelled = false;
+    const processAll = async () => {
+      const results = [];
+      for (const p of visibleProps) {
+        if (cancelled) break;
+        if (p.lat && p.lng) {
+          results.push({ ...p, _lat: p.lat, _lng: p.lng });
+        } else if (p.location) {
+          await new Promise(resolve => {
+            geocoder.geocode({ address: p.location }, (r, s) => {
+              if (s === "OK" && r[0]) {
+                const loc = r[0].geometry.location;
+                results.push({ ...p, _lat: loc.lat(), _lng: loc.lng() });
+              } else {
+                results.push({ ...p, _lat: null, _lng: null });
+              }
+              resolve();
+            });
+          });
+          await new Promise(r => setTimeout(r, 150));
+        } else {
+          results.push({ ...p, _lat: null, _lng: null });
+        }
+      }
+      return results;
+    };
+
+    processAll().then(results => {
+      if (cancelled) return;
+      setGeocodedProps(results);
+      setGeocoding(false);
+
+      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current = [];
+
+      const groups = groupByLocation(results);
+      groupsRef.current = groups;
+
+      const bounds = new window.google.maps.LatLngBounds();
+
+      groups.forEach(group => {
+        if (!group.lat) return;
+        bounds.extend({ lat: group.lat, lng: group.lng });
+
+        const isMulti = group.props.length > 1;
+        const marker = new window.google.maps.Marker({
+          position: { lat: group.lat, lng: group.lng },
+          map,
+          icon: makeMapIcon(getGroupColor(group), window.google),
+          label: isMulti
+            ? { text: String(group.props.length), color: "#fff", fontSize: "11px", fontWeight: "bold", fontFamily: "'DM Sans', sans-serif" }
+            : undefined,
+          title: group.props.map(p => p.name).join(", "),
+        });
+
+        group.marker = marker;
+
+        marker.addListener("mouseover", () => setHoveredGroupKey(group.key));
+        marker.addListener("mouseout", () => setHoveredGroupKey(null));
+        marker.addListener("click", () => {
+          if (group.props.length === 1) {
+            setSelectedPropId(group.props[0].id);
+            onSelectProperty(group.props[0]);
+          }
+        });
+
+        markersRef.current.push(marker);
+      });
+
+      if (!bounds.isEmpty()) map.fitBounds(bounds, { top: 60, right: 60, bottom: 60, left: 60 });
+    });
+
+    return () => {
+      cancelled = true;
+      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current = [];
+      groupsRef.current = [];
+    };
+  }, [mapReady, propKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const legendProps = geocodedProps || visibleProps;
+  const statusColor = { available: "#1a7a45", pending: "#c47f00", sold: "#b71c1c" };
 
   if (!apiKey) return (
     <div style={{ background: "#fff", borderRadius: 16, border: "0.5px solid #e2ddd5", padding: "48px 32px", textAlign: "center", maxWidth: 460, margin: "0 auto" }}>
       <div style={{ fontSize: 40, marginBottom: 14 }}>🗺</div>
       <h3 style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 24, color: "#2a2420", margin: "0 0 10px" }}>Connect Google Maps</h3>
       <p style={{ fontSize: 13, color: "#8a7f74", margin: "0 0 6px", lineHeight: 1.7 }}>
-        Paste your Google Maps API key below. Make sure the <strong>Maps Embed API</strong> is enabled in your Google Cloud Console.
+        Paste your Google Maps API key below. Make sure <strong>Maps JavaScript API</strong> and <strong>Geocoding API</strong> are enabled in Google Cloud Console.
       </p>
       <p style={{ fontSize: 12, color: "#b0a48e", margin: "0 0 20px", lineHeight: 1.6 }}>
         Your key is saved in this browser only and never sent anywhere except Google.
@@ -359,84 +531,98 @@ const MapView = ({ properties, onSelectProperty }) => {
   );
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16, alignItems: "start" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16, alignItems: "start" }}>
 
-      {/* Property list sidebar */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 580, overflowY: "auto" }}>
-        {propertiesWithCoords.length === 0 && (
-          <div style={{ background: "#fff", borderRadius: 12, border: "0.5px solid #e2ddd5", padding: 20, textAlign: "center", color: "#8a7f74", fontSize: 13 }}>
-            No properties have coordinates yet. Add listings to see them here.
+      {/* Sidebar */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 580, overflowY: "auto" }}>
+        {geocoding && (
+          <div style={{ background: "#faf8f5", borderRadius: 10, border: "0.5px solid #e2ddd5", padding: "10px 14px", fontSize: 12, color: "#8a7f74", textAlign: "center" }}>
+            Locating properties on map…
           </div>
         )}
-        {propertiesWithCoords.map(p => {
-          const isActive = activeProperty?.id === p.id;
-          const statusColors = { available: "#1a7a45", pending: "#c47f00", sold: "#b71c1c" };
+        {legendProps.length === 0 && (
+          <div style={{ background: "#fff", borderRadius: 12, border: "0.5px solid #e2ddd5", padding: 20, textAlign: "center", color: "#8a7f74", fontSize: 13 }}>
+            No active properties to display.
+          </div>
+        )}
+        {legendProps.map(p => {
+          const propGroup = groupsRef.current.find(g => g.props.some(q => q.id === p.id));
+          const pinHovered = propGroup?.key === hoveredGroupKey;
+          const isSelected = p.id === selectedPropId;
+          const hasCoords = geocodedProps ? p._lat != null : true;
           return (
             <div
               key={p.id}
-              onClick={() => setSelectedProperty(p)}
               style={{
-                background: "#fff",
-                borderRadius: 12,
-                border: isActive ? "2px solid #2a2420" : "0.5px solid #e2ddd5",
-                padding: "12px 14px",
+                background: pinHovered ? "#e8f5e9" : "#fff",
+                borderRadius: 10,
+                border: `0.5px solid ${pinHovered ? "#a3d9b8" : "#e2ddd5"}`,
+                padding: "10px 12px",
                 cursor: "pointer",
-                transition: "border 0.15s",
+                opacity: hasCoords ? 1 : 0.5,
+                transition: "background 0.15s, border-color 0.15s",
+              }}
+              onMouseEnter={() => {
+                setSidebarHoverId(p.id);
+              }}
+              onMouseLeave={() => {
+                setSidebarHoverId(null);
+              }}
+              onClick={() => {
+                setSelectedPropId(prev => prev === p.id ? null : p.id);
+                onSelectProperty(p);
               }}
             >
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                {!isPlaceholder(p.frontImage) && (
-                  <img src={p.frontImage} alt={p.name} style={{ width: 52, height: 42, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} />
-                )}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 15, fontWeight: 600, color: "#2a2420", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                  <div style={{ fontSize: 11, color: "#8a7f74", marginTop: 1 }}>{p.location}</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-                    <span style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 14, fontWeight: 600, color: "#2a2420" }}>{fmtPrice(p.price)}</span>
-                    <span style={{ fontSize: 10, background: isActive ? "#2a2420" : "#f5f1eb", color: isActive ? "#fff" : statusColors[p.status], borderRadius: 20, padding: "2px 7px", fontWeight: 500 }}>
-                      {p.status === "pending" ? "Under Offer" : p.status?.charAt(0).toUpperCase() + p.status?.slice(1)}
-                    </span>
-                  </div>
-                </div>
+              <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 14, fontWeight: 600, color: "#2a2420", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+              <div style={{ fontSize: 11, color: "#8a7f74", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {p.location}{!hasCoords ? " · no pin" : ""}
               </div>
-              {isActive && (
-                <button
-                  onClick={e => { e.stopPropagation(); onSelectProperty(p); }}
-                  style={{ marginTop: 8, width: "100%", background: "#2a2420", color: "#fff", border: "none", borderRadius: 7, padding: "6px 0", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
-                >View Full Details →</button>
-              )}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 4 }}>
+                <span style={{ fontSize: 12, fontFamily: "'Cormorant Garamond', serif", fontWeight: 600, color: "#2a2420" }}>{fmtPrice(p.price)}</span>
+                <span style={{ fontSize: 10, background: STATUS_COLORS[p.status]?.bg || "#f5f1eb", color: statusColor[p.status] || "#8a7f74", borderRadius: 20, padding: "2px 7px", fontWeight: 500 }}>
+                  {p.status === "pending" ? "Under Offer" : p.status?.charAt(0).toUpperCase() + p.status?.slice(1)}
+                </span>
+              </div>
             </div>
           );
         })}
 
-        {/* Change key */}
+        {/* Status key */}
+        <div style={{ display: "flex", gap: 10, padding: "6px 2px", flexWrap: "wrap" }}>
+          {[["available", "Available"], ["pending", "Under Offer"], ["sold", "Sold"]].map(([s, label]) => (
+            <div key={s} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: statusColor[s] }} />
+              <span style={{ fontSize: 10, color: "#8a7f74", fontFamily: "'DM Sans', sans-serif" }}>{label}</span>
+            </div>
+          ))}
+        </div>
+
         <button
-          onClick={() => { setApiKey(""); try { localStorage.removeItem(GMAPS_API_KEY_STORAGE); } catch {} }}
-          style={{ background: "transparent", color: "#b0a48e", border: "none", fontSize: 11, cursor: "pointer", padding: "4px 0", fontFamily: "'DM Sans', sans-serif" }}
+          onClick={() => {
+            setApiKey(""); setMapReady(false); setGeocodedProps(null); setMapError(null);
+            const s = document.querySelector("[data-gmaps-js]"); if (s) s.remove();
+            try { localStorage.removeItem(GMAPS_API_KEY_STORAGE); } catch {}
+          }}
+          style={{ background: "transparent", color: "#b0a48e", border: "none", fontSize: 11, cursor: "pointer", padding: "2px 0", fontFamily: "'DM Sans', sans-serif", textAlign: "left" }}
         >Change API key</button>
       </div>
 
-      {/* Map iframe */}
-      <div style={{ borderRadius: 16, overflow: "hidden", border: "0.5px solid #e2ddd5", position: "relative" }}>
-        {activeProperty
-          ? <iframe
-              key={activeProperty.id}
-              src={getEmbedUrl(activeProperty)}
-              width="100%"
-              height="580"
-              style={{ border: "none", display: "block" }}
-              allowFullScreen
-              loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-            />
-          : <div style={{ height: 580, background: "#f7f3ef", display: "flex", alignItems: "center", justifyContent: "center", color: "#8a7f74", fontSize: 14 }}>
-              Select a property to view on map
-            </div>
-        }
-        {activeProperty && (
-          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, rgba(42,36,32,0.75))", padding: "24px 16px 14px" }}>
-            <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 18, fontWeight: 600, color: "#fff" }}>{activeProperty.name}</div>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>📍 {activeProperty.location} · ✈️ {activeProperty.nearestAirport} · {activeProperty.driveToAirport}</div>
+      {/* Map container */}
+      <div style={{ position: "relative", borderRadius: 16, overflow: "hidden", border: "0.5px solid #e2ddd5" }}>
+        <div ref={mapContainerRef} style={{ height: 580 }} />
+        {!mapReady && !mapError && (
+          <div style={{ position: "absolute", inset: 0, background: "#f7f3ef", display: "flex", alignItems: "center", justifyContent: "center", color: "#8a7f74", fontSize: 14, fontFamily: "'DM Sans', sans-serif" }}>
+            Loading map…
+          </div>
+        )}
+        {mapError && (
+          <div style={{ position: "absolute", inset: 0, background: "#faf8f5", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: 32, textAlign: "center" }}>
+            <div style={{ fontSize: 32 }}>⚠️</div>
+            <div style={{ fontSize: 13, color: "#b71c1c", lineHeight: 1.6, fontFamily: "'DM Sans', sans-serif" }}>{mapError}</div>
+            <button
+              onClick={() => { const s = document.querySelector("[data-gmaps-js]"); if (s) s.remove(); setMapError(null); setMapReady(false); }}
+              style={{ background: "#2a2420", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+            >Try Again</button>
           </div>
         )}
       </div>
@@ -641,17 +827,19 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
     >
       <div
         onClick={e => e.stopPropagation()}
-        ref={modalRef}
         style={{
           background: "#fff",
           borderRadius: 20,
           maxWidth: 720,
           width: "100%",
           maxHeight: "90vh",
-          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
           fontFamily: "'DM Sans', sans-serif",
         }}
       >
+      <div ref={modalRef} style={{ flex: 1, overflowY: "auto" }}>
         {/* Photos */}
         <div style={{ position: "relative" }}>
           <div style={{ display: "grid", gridTemplateColumns: (property.frontImage && property.livingRoomImage) ? "1fr 1fr" : "1fr" }}>
@@ -684,7 +872,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
             }}
           >📷 Edit Photos</button>
           <button
-            onClick={() => { setEditingDetails(d => !d); setShowReExtract(false); }}
+            onClick={() => { editingDetails ? setEditingDetails(false) : openDetailsEditor(); setShowReExtract(false); }}
             style={{
               position: "absolute", top: 10, right: 130,
               background: "rgba(255,255,255,0.92)", color: "#2a2420",
@@ -741,7 +929,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
               <Field label="PROPERTY NAME" field="name" />
               <Field label="LOCATION" field="location" />
               <Field label="PRICE (USD)" field="price" type="number" />
-              <Field label="STATUS" field="status" options={["available", "pending", "sold"]} />
+              <Field label="STATUS" field="status" options={["available", "pending", "sold", "inactive"]} />
               <Field label="BEDROOMS" field="bedrooms" type="number" />
               <Field label="BATHROOMS" field="bathrooms" type="number" />
               <Field label="HOUSE SIZE (sqft)" field="houseSqft" type="number" />
@@ -796,7 +984,7 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
           </div>
         )}
 
-        <div style={{ padding: "24px 28px 28px" }}>
+        <div style={{ padding: "24px 28px 4px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
             <div>
               <h2 style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 32, fontWeight: 600, color: "#2a2420", margin: 0 }}>{property.name}</h2>
@@ -878,44 +1066,45 @@ const DetailModal = ({ property, onClose, onRate, onUpdatePhotos, onUpdateNotes,
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 10 }}>
-            {property.website && (
-              <a
-                href={property.website}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  flex: 1, textAlign: "center",
-                  background: "#2a2420", color: "#fff",
-                  padding: "11px 0", borderRadius: 10,
-                  textDecoration: "none", fontSize: 13, fontWeight: 500,
-                  fontFamily: "'DM Sans', sans-serif",
-                }}
-                onClick={e => e.stopPropagation()}
-              >View Listing ↗</a>
-            )}
-            <button
-              onClick={() => onArchive(property.id)}
-              style={{
-                flex: 1, background: "#fff8f0", color: "#c47f00",
-                border: "0.5px solid #ffd08a", borderRadius: 10,
-                padding: "11px 0", fontSize: 13, fontWeight: 500,
-                cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
-              }}
-            >Archive</button>
-            <button
-              onClick={onClose}
-              style={{
-                flex: 1, background: "#faf8f5", color: "#2a2420",
-                border: "0.5px solid #e2ddd5", borderRadius: 10,
-                padding: "11px 0", fontSize: 13, fontWeight: 500,
-                cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
-              }}
-            >Close</button>
-          </div>
         </div>
       </div>
+      <div style={{ flexShrink: 0, borderTop: "0.5px solid #ede8e0", padding: "16px 28px", background: "#fff", borderRadius: "0 0 20px 20px", display: "flex", gap: 10 }}>
+        {property.website && (
+          <a
+            href={property.website}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              flex: 1, textAlign: "center",
+              background: "#2a2420", color: "#fff",
+              padding: "11px 0", borderRadius: 10,
+              textDecoration: "none", fontSize: 13, fontWeight: 500,
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+            onClick={e => e.stopPropagation()}
+          >View Listing ↗</a>
+        )}
+        <button
+          onClick={() => onArchive(property.id)}
+          style={{
+            flex: 1, background: "#fff8f0", color: "#c47f00",
+            border: "0.5px solid #ffd08a", borderRadius: 10,
+            padding: "11px 0", fontSize: 13, fontWeight: 500,
+            cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+          }}
+        >Archive</button>
+        <button
+          onClick={onClose}
+          style={{
+            flex: 1, background: "#faf8f5", color: "#2a2420",
+            border: "0.5px solid #e2ddd5", borderRadius: 10,
+            padding: "11px 0", fontSize: 13, fontWeight: 500,
+            cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+          }}
+        >Close</button>
+      </div>
     </div>
+  </div>
   );
 };
 
@@ -1106,6 +1295,8 @@ export default function PropertyApp() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [showAddField, setShowAddField] = useState(false);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [statusCheckResults, setStatusCheckResults] = useState(null);
 
   // Load from Supabase on mount
   useEffect(() => {
@@ -1272,6 +1463,40 @@ export default function PropertyApp() {
     setLoadingSuggestions(false);
   };
 
+  const checkListingStatuses = async () => {
+    setCheckingStatus(true);
+    const changed = [];
+    for (const prop of properties) {
+      if (!prop.website) {
+        if (prop.status !== "inactive") {
+          handleUpdateDetails(prop.id, { status: "inactive" });
+          changed.push({ name: prop.name, location: prop.location, newStatus: "inactive", reason: "No listing URL" });
+        }
+        continue;
+      }
+      try {
+        const res = await fetch(`/api/check-listing?url=${encodeURIComponent(prop.website)}`);
+        const data = await res.json();
+        if (!data.active) {
+          if (prop.status !== "inactive") {
+            handleUpdateDetails(prop.id, { status: "inactive" });
+            changed.push({ name: prop.name, location: prop.location, newStatus: "inactive", reason: "Page unreachable" });
+          }
+        } else if (data.inferredStatus && data.inferredStatus !== prop.status) {
+          handleUpdateDetails(prop.id, { status: data.inferredStatus });
+          changed.push({ name: prop.name, location: prop.location, newStatus: data.inferredStatus, reason: `Listed as ${data.inferredStatus} on page` });
+        }
+      } catch {
+        if (prop.status !== "inactive") {
+          handleUpdateDetails(prop.id, { status: "inactive" });
+          changed.push({ name: prop.name, location: prop.location, newStatus: "inactive", reason: "Check failed" });
+        }
+      }
+    }
+    setCheckingStatus(false);
+    setStatusCheckResults(changed);
+  };
+
   const addCustomField = () => {
     if (!customFieldKey || !customFieldTarget) return;
     setProperties(prev => prev.map(p =>
@@ -1393,6 +1618,7 @@ export default function PropertyApp() {
           <option value="available">Available</option>
           <option value="pending">Under Offer</option>
           <option value="sold">Sold</option>
+          <option value="inactive">Inactive</option>
         </select>
 
         {view === "list" && (
@@ -1407,12 +1633,22 @@ export default function PropertyApp() {
         )}
 
         <button
+          onClick={checkListingStatuses}
+          disabled={checkingStatus}
+          style={{
+            border: "0.5px solid #e2ddd5", borderRadius: 8, padding: "6px 12px",
+            fontSize: 13, background: "#faf8f5", color: "#2a2420",
+            fontFamily: "'DM Sans', sans-serif", cursor: checkingStatus ? "wait" : "pointer",
+            marginLeft: "auto",
+          }}
+        >{checkingStatus ? "Checking…" : "🔍 Check Listing Status"}</button>
+
+        <button
           onClick={() => setShowAddField(v => !v)}
           style={{
             border: "0.5px solid #e2ddd5", borderRadius: 8, padding: "6px 12px",
             fontSize: 13, background: "#faf8f5", color: "#2a2420",
             fontFamily: "'DM Sans', sans-serif", cursor: "pointer",
-            marginLeft: "auto",
           }}
         >+ Custom Field</button>
 
@@ -1815,6 +2051,58 @@ export default function PropertyApp() {
           onUpdateDetails={handleUpdateDetails}
           onArchive={handleArchive}
         />
+      )}
+
+      {/* Status check results popup */}
+      {statusCheckResults !== null && (
+        <div
+          onClick={() => setStatusCheckResults(null)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(30,25,20,0.5)",
+            zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: "#fff", borderRadius: 16, padding: 28,
+              maxWidth: 480, width: "100%", fontFamily: "'DM Sans', sans-serif",
+              maxHeight: "80vh", overflowY: "auto",
+            }}
+          >
+            <h3 style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 22, fontWeight: 600, color: "#2a2420", margin: "0 0 12px" }}>
+              Listing Status Check
+            </h3>
+            {statusCheckResults.length === 0 ? (
+              <p style={{ fontSize: 14, color: "#1a7a45", margin: "0 0 20px", lineHeight: 1.6 }}>
+                All listings checked — no status changes needed.
+              </p>
+            ) : (
+              <>
+                <p style={{ fontSize: 13, color: "#8a7f74", margin: "0 0 14px", lineHeight: 1.6 }}>
+                  {statusCheckResults.length} listing{statusCheckResults.length !== 1 ? "s" : ""} updated.
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                  {statusCheckResults.map((r, i) => (
+                    <div key={i} style={{ background: "#faf8f5", borderRadius: 8, padding: "10px 14px", border: "0.5px solid #ede8e0" }}>
+                      <div style={{ fontWeight: 500, color: "#2a2420", fontSize: 14 }}>{r.name}</div>
+                      <div style={{ color: "#8a7f74", fontSize: 12, margin: "2px 0 6px" }}>{r.location} · {r.reason}</div>
+                      <StatusBadge status={r.newStatus} />
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            <button
+              onClick={() => setStatusCheckResults(null)}
+              style={{
+                width: "100%", background: "#2a2420", color: "#fff",
+                border: "none", borderRadius: 10, padding: "10px 0",
+                fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans', sans-serif", fontWeight: 500,
+              }}
+            >OK</button>
+          </div>
+        </div>
       )}
     </div>
   );
